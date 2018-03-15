@@ -6,32 +6,21 @@ from neo4jrestclient.client import GraphDatabase
 from py2neo import Graph, authenticate, Node, Relationship
 import csv
 import os
-from neo4j.v1 import GraphDatabase
-
-
-#db = GraphDatabase("http://localhost:7474", username="neo4j", password="swordfish")
 
 #Local Testing (uncomment both lines below)
-#authenticate("localhost:7474", "neo4j", "swordfish")
+#authenticate("localhost:7474", "neo4j", "PUTPASSWORDHERE")
 #graph = Graph()
 
-uri = "bolt://67.205.151.165:7687"
-driver = GraphDatabase.driver(uri, auth=("neo4j", "@OcouranByte99"))
+#Get Neo4j password
+tokenfile = open(os.path.expanduser("~")+'/.pat/.neo4j_pass','r')
+neo4jpass = str(tokenfile.read())
+#Get Github API token
+tokenfile = open(os.path.expanduser("~")+'/.pat/.git_ocouran','r')
+gittoken = str(tokenfile.read())
 
-
-
-#authenticate("0.0.0.0:7473", "neo4j", "@OcouranByte99")
-#authenticate("67.205.151.165:7687", "neo4j", "@OcouranByte99")
-#authenticate("67.205.151.165:7687/db/data", "neo4j", "@OcouranByte99")
-#graph = Graph('http://Neo4j:@OcouranByte99@67.205.151.165:7687/db/data/')
-
-# set up authentication parameters
-#authenticate("67.205.151.165:7474", "neo4j", "@OcouranByte99")
-# connect to authenticated graph database
-#graph = Graph("http://67.205.151.165:7474/db/data")
-
-#graph = Graph('http://67.205.151.165:7474/db/data', user='neo4j', password='@OcouranByte99')
-
+#Remote Authentication
+authenticate("67.205.151.165:7474", "neo4j", neo4jpass)
+graph = Graph('http://67.205.151.165:7474', user='neo4j', password=neo4jpass)
 
 #Organisation's repos
 #curl https://api.github.com/orgs/bitcoin/repos
@@ -48,21 +37,39 @@ driver = GraphDatabase.driver(uri, auth=("neo4j", "@OcouranByte99"))
 #Users Following 
 #https://api.github.com/users/{user}/following
 
-#User again
-
-#Get Github API token
-#tokenfile = open('~/.pat/.git_ocouran','r')
-#gittoken = tokenfile.read()
-#print(gittoken)
-
 def get_json(path):
-    r = requests.get(path, headers={'Authorization': '9096affa3b2c68ed2d2afefc8b4fa9128a63cf6f'}).json()
+    #Unauthenticated Request
+    #r = requests.get(path).json()
+    #Authenticated Request
+    ratedata = get_ratelimit_auth()['resources']['core']
+    #print(ratedata)    
+    remaining = ratedata['remaining']
+    reset = ratedata['reset']
+    print('remaining:',remaining,' >>>','Resetting at:', reset)
+    r = requests.get(path, headers={'Authorization': 'token '+gittoken}).json()
+
     return(r)    
+
+def get_head(path):
+    r = requests.head(path, headers={'Authorization': 'token '+gittoken})
+    return(r.text)   
+
+def get_ratelimit_auth():
+    path='https://api.github.com/rate_limit'
+    r = requests.get(path, headers={'Authorization': 'token '+gittoken})
+    return(r.json())   
+
+def get_ratelimit_unauth(path='https://api.github.com/rate_limit'):
+    r = requests.get(path)
+    return(r.json())   
+
+ 
 
 def schema_set_project():
     #run this just once
-    graph = Graph()   
-    #Set uniqueness relationships in DB
+    #graph = Graph()   
+    #Set uniqueness relationships in DB    
+    #graph.schema.create_uniqueness_constraint('Repo', 'id')
     graph.schema.create_uniqueness_constraint('Organisation', 'name')
     #graph.schema.create_uniqueness_constraint('Repo', 'name')  #giving problems
     graph.schema.create_uniqueness_constraint('License', 'name')
@@ -85,24 +92,27 @@ def insert_repos(repo, jsoninfo):
     tx = graph.begin()
     #Create Repo Node
     org1 = Node('Organisation', name=repo, lastupdate=time.time())
+    #graph.create(org1)
     tx.merge(org1)
+    print("Insert Organisation")
     try:
         tx.commit()
     except:
         print('Error pushing data')
 
     for repo_json in jsoninfo:
-        print('Repo_json:',repo_json)
+        #print('Repo_json:',repo_json)
         p1,l1,o1 = insert_project('Repo', repo_json) 
         r1 = Relationship(p1, "BelongsTo", org1)
         graph.create(r1)
+        print("Created Relationship: Belongs To")
         
 
 def insert_project(nodetype, jsoninfo):
     ''' 
     NodeType is the type of item being inserted: Organisation, repo
     '''
-    print('Insert Project >>', jsoninfo)
+    #print('Insert Project >>', jsoninfo)
 
     keys = [*jsoninfo]
     #print(jsoninfo)
@@ -122,8 +132,6 @@ def insert_project(nodetype, jsoninfo):
         except:
             pass
     #Create a name field, so its labelled in graph db
-    print(newdicts)
-    print(jsoninfo)
     owner['name'] = owner['login']    
 
     #Create Transaction to DB
@@ -138,7 +146,7 @@ def insert_project(nodetype, jsoninfo):
         license['name'] = 'None'
     l1 = Node('License', **license)
     tx.merge(l1)
-    
+    print("Created License Node")
     #Create Owner Node
     #o1 = Node('Owner',**owner)
     #tx.merge(o1)
@@ -146,20 +154,44 @@ def insert_project(nodetype, jsoninfo):
 
     #Commit Transaction to DB
     tx.commit()
-
+    print("tx.commit")
     #Create Relationships
     r1 = Relationship(p1, "HasLicense", l1)
     graph.create(r1)
+    print("create relationship: Project to License")
     #r2 = Relationship(p1, "OwnedBy", o1)
     #graph.create(r2)
 
     return p1,l1,o1
 
-def insert_contributor():
-    pass
-
-
+def get_contributors():
     
+    repos = graph.run("match (n:Repo) return n.id as ID,n.name as repo, n.contributors_url as contributors_url")
+    for repo in repos:
+        ID = repo[0]
+        print('Getting Contributors for Repo ID:', ID)
+        try:
+            contributors = get_json(repo['contributors_url'])
+            #print(type(contributors))
+            #print(contributors)
+            for contributor in contributors:
+                #print(contributor)
+                contributor['name'] = contributor['login']  #add a name field
+                
+                #tx = graph.begin()
+                #Create User node
+                #u1 = Node(contributor['type'],**contributor)
+                #tx.merge(u1)
+                #tx.commit()
+                #Create Relationship
+                #r1 = Relationship(u1, "Contributor", nr)
+                #graph.create(r1)
+    
+                #Create Contributor Node and relationship
+                #graph.run("CREATE (a:User {data})<-[:Contributor]-(b:Repo{id:{ID}})", data = {**contributor}, ID=ID)
+                graph.run("MATCH (b:Repo{id:{ID}}) CREATE (a:User {data})<-[:Contributor]-(b)", data = {**contributor}, ID=ID)
+        except:
+            print('Could not get Contributors for repo ID:',ID)
 
 
 
@@ -168,7 +200,7 @@ def insert_contributor():
 
 
 if __name__ == '__main__':
-    schema_set_project()
+    #schema_set_project()
     #proj = get_json('https://api.github.com/repos/monero-project/monero')
     #proj = get_json('https://api.github.com/repos/ethereum/go-ethereum')
     #proj = get_json('https://api.github.com/repos/ethereum/web3.py')
@@ -176,7 +208,15 @@ if __name__ == '__main__':
     #something = insert_project('repo', proj)
 
     #repos = get_json('https://api.github.com/orgs/bitcoin/repos')
-    #repos = get_json('https://api.github.com/orgs/ripple/repos')
+    #repos = get_json('https://api.github.com/orgs/saltstack/repos')
     #something = insert_repos('Bitcoin',repos)
     
-    repos_from_list('org_list.txt')
+    #repos_from_list('org_list.txt')
+    
+    get_contributors()
+    
+
+    #print(get_ratelimit_auth())
+    #print(get_ratelimit_unauth())
+    #print(get_head('https://api.github.com/orgs/ripple/repos'))
+
